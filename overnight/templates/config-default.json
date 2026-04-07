@@ -164,17 +164,25 @@
     },
     "8": {
       "enabled": true,
-      "description": "Fix & Refactor",
+      "description": "Generator-Evaluator self-improvement loop",
       "auto_fix_severities": ["CRITICAL", "HIGH"],
       "max_fixes_per_run": 20,
       "max_commits": 25,
       "max_lines_changed_per_fix": 50,
-      "auto_refactor": false
-    },
-    "9": {
-      "enabled": true,
-      "description": "E2E regression check (mandatory after Phase 8 fixes)",
-      "auto_revert_on_regression": true
+      "auto_refactor": false,
+      "evaluator": {
+        "max_eval_loops": 5,
+        "min_commit_score": 60,
+        "convergence_threshold": 3,
+        "browser_engine": "auto",
+        "scoring_weights": {
+          "functional": 20,
+          "browser": 20,
+          "visual": 20,
+          "data": 20,
+          "a11y": 20
+        }
+      }
     },
     "10": {
       "enabled": true,

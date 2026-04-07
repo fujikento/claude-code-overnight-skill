@@ -654,31 +654,207 @@ A/B/C/D グレードと具体的な改善ポイント (最大5件)
 
 ---
 
-## Phase 9: E2E回帰確認 — 詳細手順
+## Phase 8-9: Evaluator 採点シート — 詳細手順
 
-Phase 8 で修正を行った場合のみ実行。
+Phase 8-9 は統合された Generator-Evaluator ループ。旧 Phase 9 (回帰確認) は Evaluator の一部として吸収。
 
-### Step 9.1: 基本回帰
+### ブラウザエンジン選択
 
-修正されたファイルに関連するページを特定:
-- `.tsx` / `.jsx` ファイル → そのコンポーネントが使われるページ
-- API ルートファイル → そのAPIを呼ぶページ
-- CSS / スタイルファイル → 全ページ
+```
+# 優先順位: Playwright MCP → Puppeteer MCP → TEST_CMD のみ
+BROWSER_ENGINE="none"
+if Playwright MCP tools available (mcp__playwright__*):
+  BROWSER_ENGINE="playwright"
+elif Puppeteer MCP tools available (mcp__puppeteer__*):
+  BROWSER_ENGINE="puppeteer"
+```
 
-### Step 9.2: ページ再テスト
+ツール名マッピング:
+| 操作 | Playwright MCP | Puppeteer MCP |
+|------|---------------|---------------|
+| ページ遷移 | `mcp__playwright__browser_navigate` | `mcp__puppeteer__puppeteer_navigate` |
+| スクリーンショット | `mcp__playwright__browser_take_screenshot` | `mcp__puppeteer__puppeteer_screenshot` |
+| クリック | `mcp__playwright__browser_click` | `mcp__puppeteer__puppeteer_click` |
+| テキスト入力 | `mcp__playwright__browser_type` | `mcp__puppeteer__puppeteer_fill` |
+| JS 実行 | `mcp__playwright__browser_evaluate` | `mcp__puppeteer__puppeteer_evaluate` |
+| ホバー | `mcp__playwright__browser_hover` | `mcp__puppeteer__puppeteer_hover` |
+| セレクト | `mcp__playwright__browser_select_option` | `mcp__puppeteer__puppeteer_select` |
 
-対象ページに対して:
-1. `puppeteer_navigate` → ページ
-2. エラーコレクター注入
-3. `puppeteer_screenshot` → スクショ
-4. コンソールエラーチェック
-5. Phase 3 で発見した問題が修正されているか確認
-6. 新しい問題が発生していないか確認
+### Evaluator 採点ルーブリック (100点満点)
 
-### Step 9.3: 回帰検出時の対応
+#### カテゴリ 1: 機能テスト (20点)
 
-修正が新しい問題を引き起こした場合:
-1. 該当コミットを特定
-2. `git revert <commit-hash> --no-edit`
-3. issue を `[REVERTED]` に更新
-4. 朝レポートに記録: "Phase 9 で回帰検出、commit X を revert"
+```
+TEST_CMD を実行:
+- 全テスト PASS → 20点
+- 一部 FAIL だが修正対象外のテスト → 15点
+- 修正に関連するテスト FAIL → 0点
+- TEST_CMD が存在しない → 型チェック (tsc --noEmit) で代替、PASS=20, FAIL=0
+```
+
+#### カテゴリ 2: ブラウザ動作テスト (20点)
+
+修正した issue に関連するページで実操作検証:
+
+```
+Step 1: 該当ページにナビゲート
+Step 2: ネイティブダイアログ無効化 + エラーコレクター注入
+Step 3: issue の種類に応じたテスト実行:
+
+[デッドクリック修正の場合]
+  - 修正されたボタンをクリック
+  - DOM 変化 or ネットワークリクエスト or モーダル表示を確認
+  - 動作あり → 20点、動作なし → 0点
+
+[フォーム修正の場合]
+  - フォームに正常値を入力 → submit
+  - 200/201 レスポンス → 20点
+  - バリデーションエラー適切表示 → 15点 (修正が不完全だが改善)
+  - エラーハンドリングなし → 0点
+
+[トグル修正の場合]
+  - トグルクリック → API コール確認 → リロード → 値保持確認
+  - 完全動作 → 20点
+  - API コールあるが保持されない → 10点
+  - API コールなし → 0点
+
+[API エラー修正の場合]
+  - curl で API を直接叩く
+  - 200 返却 + 正常レスポンス → 20点
+  - 200 だが不正なレスポンス → 10点
+  - 4xx/5xx → 0点
+
+[コードのみの修正 (UIなし) の場合]
+  - 修正箇所を静的解析
+  - issue が解決されていると判断 → 20点
+  - 部分的に解決 → 10点
+  - 解決されていない → 0点
+```
+
+#### カテゴリ 3: ビジュアル品質 (20点)
+
+修正前後のスクショを比較:
+
+```
+Step 1: 修正前のスクショ (Phase 3 で撮影済み) を参照
+Step 2: 修正後のページをスクショ撮影
+Step 3: AI で比較分析:
+
+チェック項目:
+- レイアウト崩壊なし → +5点
+- 要素の重なりなし → +5点
+- テキスト切れなし → +5点
+- 修正による意図しない視覚的変化なし → +5点
+
+減点:
+- 新しいレイアウト崩壊 → -10点
+- 新しい要素重なり → -10点
+- 既存要素が消えた → -15点
+- 白画面 / エラー表示 → -20点 (0点に)
+```
+
+**Web アプリでない場合**: このカテゴリは満点 (20点) 扱い。
+
+#### カテゴリ 4: データ整合性 (20点)
+
+```
+Step 1: 修正後のページで表示されるデータを抽出 (browser_evaluate)
+Step 2: 同じデータを API 経由で取得 (curl)
+Step 3: 比較:
+
+- 数値が完全一致 → 10点
+- テキストが完全一致 → 5点
+- リスト件数が一致 → 5点
+
+減点:
+- 数値不一致 → -10点
+- データ欠損 (API にあるが UI に表示されない) → -5点
+- 余分なデータ (UI に表示されるが API にない) → -5点
+```
+
+**Web アプリでない / API がない場合**: 満点 (20点) 扱い。
+
+#### カテゴリ 5: アクセシビリティ (20点)
+
+```
+Step 1: 修正後のページで a11y チェック実行 (browser_evaluate で JS 注入):
+
+チェック項目:
+- テキストコントラスト比 ≥ 4.5:1 (通常) / ≥ 3:1 (大文字) → +8点
+- タッチターゲット ≥ 44px → +4点
+- フォーカスリング可視 → +4点
+- aria-label / role 適切 → +4点
+
+減点:
+- コントラスト比 < 4.5:1 → -4点/箇所 (最大-8)
+- タッチターゲット < 44px → -2点/箇所 (最大-4)
+- フォーカスリングなし → -4点
+- aria 不適切 → -2点/箇所 (最大-4)
+
+修正前より a11y スコアが悪化した場合: さらに -5点のペナルティ
+```
+
+**Web アプリでない場合**: 満点 (20点) 扱い。
+
+### Evaluator のフィードバック生成
+
+スコアに関わらず、Evaluator は Generator に以下のフィードバックを返す:
+
+**合格 (100点) の場合も必ずフィードバック**:
+```
+{
+  "score": 100,
+  "feedback_to_generator": "完璧。修正パターンが効果的だった: [具体的に何が良かったか]",
+  "learnings": "このパターンの修正には [手法] が有効。次回も同様のアプローチを推奨。"
+}
+```
+
+**不合格 (<100点) の場合**:
+```
+{
+  "score": 75,
+  "feedback_to_generator": "機能は動作するがコントラスト比が不足 (3.2:1, 要4.5:1)。text-gray-400 → text-gray-600 に変更すべき。",
+  "specific_failures": [
+    { "category": "a11y", "detail": "contrast ratio 3.2:1 on .btn-primary text", "suggestion": "darken text color" }
+  ],
+  "screenshot_path": ".overnight-state/screenshots/issue-001-eval-2.png"
+}
+```
+
+### 収束判定の詳細
+
+```
+ループ履歴の例:
+
+Attempt 1: Score 60  → Generator に FB → 再修正
+Attempt 2: Score 80  → Generator に FB → 再修正
+Attempt 3: Score 85  → Generator に FB → 再修正
+Attempt 4: Score 85  → 同スコア1回目
+Attempt 5: Score 85  → 同スコア2回目 → 収束判定: STOP
+→ Score 85 でコミット ([PARTIAL] ステータス)
+
+別のパターン:
+Attempt 1: Score 70  → Generator に FB → 再修正
+Attempt 2: Score 95  → Generator に FB → 再修正
+Attempt 3: Score 90  → スコア低下! → Attempt 2 のベスト (95) に戻す → STOP
+→ Score 95 でコミット ([CLOSED] ステータス)
+
+最良パターン:
+Attempt 1: Score 80  → Generator に FB → 再修正
+Attempt 2: Score 100 → 完璧! → commit → STOP
+→ Score 100 で commit + 成功パターン記録
+```
+
+### Evaluator の実行効率
+
+各 issue の評価で全ページをテストするのではなく、**影響範囲のみテスト**:
+
+```
+修正ファイル → 影響ページのマッピング:
+- components/Button.tsx → Button を使う全ページ (grep で特定)
+- app/orders/page.tsx → /orders のみ
+- styles/globals.css → 全ページ
+- lib/api/orders.ts → /orders, /dashboard (API を使うページ)
+
+最小テストセット = 修正ファイルから影響を受けるページのみ
+```

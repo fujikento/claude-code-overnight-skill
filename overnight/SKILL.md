@@ -622,70 +622,205 @@ window.prompt = () => '';
 
 ---
 
-## Phase 8: Fix & Refactor
+## Phase 8-9: Generator-Evaluator 自己改善ループ
 
-**最重要フェーズ** — 全発見を統合して優先度順に修正。
+**最重要フェーズ** — 全発見を統合し、Generator が修正 → Evaluator が Playwright でブラウザ実操作検証・採点 → 100点になるまでループ。
+
+### アーキテクチャ概要
+
+```
+┌─────────────────────────────────────────────────────┐
+│  Issue ごとのループ (最大 max_eval_loops 回)         │
+│                                                      │
+│  ┌──────────┐    修正     ┌──────────┐              │
+│  │Generator │ ─────────→ │Evaluator │              │
+│  │(修正者)  │ ←───────── │(採点者)  │              │
+│  └──────────┘  フィード   └──────────┘              │
+│                 バック                                │
+│                                                      │
+│  Evaluator は Playwright でブラウザ実操作:            │
+│  - 機能テスト (ボタン押す→動くか)                    │
+│  - ビジュアルテスト (スクショ→崩れてないか)          │
+│  - データ整合性 (API↔UI一致)                        │
+│  - アクセシビリティ (コントラスト/タッチターゲット)  │
+│  - テスト実行 (TEST_CMD PASS)                        │
+│                                                      │
+│  Score: 0-100                                        │
+│  - 100 → commit + 成功フィードバック記録             │
+│  - <100 → 減点理由を Generator に返す → 再修正      │
+│                                                      │
+│  終了条件:                                           │
+│  - Score = 100 (完璧)                                │
+│  - 3回連続同スコア (収束 — これ以上改善不可)         │
+│  - スコア低下 (悪化 — ベストに戻してcommit)          │
+│  - max_eval_loops 到達 (強制終了 — ベストでcommit)   │
+│  - 時間/コスト上限                                   │
+└─────────────────────────────────────────────────────┘
+```
+
+### ブラウザエンジン選択
+
+Playwright MCP (`mcp__playwright__*`) を優先使用。利用不可の場合は Puppeteer MCP (`mcp__puppeteer__*`) にフォールバック。どちらもなければ TEST_CMD のみで評価 (機能テストスコアのみ、ビジュアル/a11y は満点扱い)。
 
 ### 8a. 課題統合
+
 `.overnight-state/issues/all-issues.md` を読み込み:
 1. 重大度順にソート: CRITICAL > HIGH > MEDIUM
 2. 同一ファイルの issue をグループ化 (1回のファイル編集で複数修正)
 3. `--dry-run` の場合はここで終了 → 「修正候補」リストとして朝レポートに出力
 
-### 8b. 修正ループ
-
-`.overnight-state/config.json` の設定に従う:
-- `auto_fix_severities`: デフォルト `["CRITICAL", "HIGH"]`
-- `max_fixes_per_run`: デフォルト `20`
-- `max_lines_changed_per_fix`: デフォルト `50`
-- `never_modify`: `["*.lock", "*.env", "*.env.*", "migrations/", "*.migration.*", ".github/"]`
+### 8b. Generator-Evaluator ループ
 
 各 issue に対して (最大 `max_fixes_per_run` 件):
 
-1. **時間チェック** — 残り時間が Phase 9+10 用の時間未満なら修正終了
+#### ステップ 1: ガードチェック
+1. **時間チェック** — 残り時間が Phase 10 用の時間未満なら修正終了
 2. **コストチェック** — `estimated_cost_usd` が `MAX_COST_USD` の 90% を超えていたら修正終了
 3. **保護チェック** — `never_modify` パターンに該当 → `[DEFERRED]`
-4. **サイズ見積** — 50行超の変更が必要 → `[DEFERRED] (too large for auto-fix)` + **朝レポートの「要対応」セクションに含める** (永久に DEFERRED のまま放置しない)
-5. **ファイル読み込み** — 対象ファイルの内容を Read
-6. **修正実行** — issue の種類に応じて:
-   - コード品質/セキュリティ → 直接修正
-   - デザイン (トークン化、コントラスト、a11y) → **frontend-web** agent に委譲
-   - テスト不足 → **test-automator** agent に委譲
-   - 複雑なバグ → **debugger** agent に委譲
-7. **テスト実行** — `TEST_CMD` を実行
-8. **結果判定**:
-   - テスト PASS → `git add <specific files> && git commit -m "fix(overnight): <description>"`
-   - テスト FAIL → `git checkout . && git clean -fd` → `[SKIPPED] fix caused test failure`
-9. **issue 更新** — `[CLOSED]` + commit hash、または `[SKIPPED]` + 理由
+4. **サイズ見積** — 50行超の変更が必要 → `[DEFERRED]` + 朝レポートの「要対応」に記載
+
+#### ステップ 2: Generator (修正)
+
+issue の種類に応じて修正を実行:
+- コード品質/セキュリティ → 直接修正
+- デザイン (トークン化、コントラスト、a11y) → **frontend-web** agent に委譲
+- テスト不足 → **test-automator** agent に委譲
+- 複雑なバグ → **debugger** agent に委譲
+
+**Generator が受け取る情報**:
+- issue の説明、ファイルパス、重大度
+- (2回目以降) Evaluator からのフィードバック: 減点理由、どこがダメだったか、スクショ
+
+#### ステップ 3: Evaluator (採点)
+
+**Evaluator 採点シート** (5カテゴリ × 20点 = 100点満点):
+
+| カテゴリ | 配点 | 評価方法 |
+|---------|------|---------|
+| **機能テスト** | 20点 | TEST_CMD PASS (20) / FAIL (0) |
+| **ブラウザ動作** | 20点 | Playwright で該当ページ操作 → 期待動作するか |
+| **ビジュアル品質** | 20点 | スクショ撮影 → レイアウト崩壊・要素重なり・表示崩れチェック |
+| **データ整合性** | 20点 | API レスポンス vs UI 表示の一致確認 |
+| **アクセシビリティ** | 20点 | コントラスト比、タッチターゲット、フォーカスリング |
+
+**Web アプリでない場合の採点 (TEST_CMD のみ)**:
+- 機能テスト: 50点 (TEST_CMD PASS/FAIL)
+- コード品質: 50点 (修正が issue を解決しているかの静的分析)
+- ブラウザ系カテゴリはスキップ (満点扱い)
+
+**詳細な採点ルーブリックは `reference/phase-details.md` の「Evaluator 採点シート」セクション参照。**
+
+Evaluator の出力形式:
+```json
+{
+  "score": 85,
+  "breakdown": {
+    "functional": { "score": 20, "max": 20, "detail": "TEST_CMD PASS" },
+    "browser": { "score": 15, "max": 20, "detail": "ボタンクリック後にモーダルが開かない" },
+    "visual": { "score": 20, "max": 20, "detail": "レイアウト正常" },
+    "data": { "score": 20, "max": 20, "detail": "API/UI一致" },
+    "a11y": { "score": 10, "max": 20, "detail": "コントラスト比 3.2:1 (要 4.5:1)" }
+  },
+  "feedback_to_generator": "コントラスト比が不足。text-gray-400 を text-gray-600 に変更すべき。モーダルの開閉は onClick ハンドラが未接続の可能性。",
+  "screenshot_path": ".overnight-state/screenshots/issue-001-eval-1.png"
+}
+```
+
+#### ステップ 4: ループ制御
+
+```
+BEST_SCORE = 0
+BEST_COMMIT = null
+CONSECUTIVE_SAME = 0
+PREV_SCORE = -1
+
+for attempt in 1..max_eval_loops:
+  if attempt > 1:
+    # 前回の修正を revert して再修正
+    git checkout . && git clean -fd
+    # Generator に Evaluator のフィードバックを渡して再修正
+    Generator.fix(issue, evaluator_feedback)
+  else:
+    Generator.fix(issue)
+
+  score = Evaluator.evaluate(issue)
+
+  # スコア記録
+  log_to ".overnight-state/phases/phase-8-eval-log.md":
+    "Issue: {id} | Attempt: {attempt} | Score: {score}/100 | Feedback: {summary}"
+
+  # === 終了条件判定 ===
+
+  # 100点 → 完璧。commit して次の issue へ
+  if score == 100:
+    git add <files> && git commit -m "fix(overnight): {description} [score:100]"
+    record_success_feedback(issue, evaluator_feedback)  # 合格フィードバックも記録
+    issue.status = "[CLOSED]"
+    break
+
+  # ベストスコア更新
+  if score > BEST_SCORE:
+    BEST_SCORE = score
+    # ベスト状態を stash に保存
+    git stash push -m "overnight-best-{issue_id}-score-{score}"
+    BEST_STASH = true
+
+  # 収束検出: 3回連続同スコア
+  if score == PREV_SCORE:
+    CONSECUTIVE_SAME += 1
+  else:
+    CONSECUTIVE_SAME = 0
+  PREV_SCORE = score
+
+  if CONSECUTIVE_SAME >= 2:  # 3回目で発動 (0,1,2)
+    log "Converged at score {score} after {attempt} attempts"
+    break
+
+  # スコア低下: 前回より下がった
+  if score < PREV_SCORE && attempt > 1:
+    log "Score decreased ({PREV_SCORE} → {score}), reverting to best"
+    git checkout . && git clean -fd
+    break
+
+# ループ終了後の処理
+if BEST_SCORE >= config.min_commit_score (default: 60):
+  # ベスト状態を復元して commit
+  if BEST_STASH:
+    git stash pop
+  git add <files> && git commit -m "fix(overnight): {description} [score:{BEST_SCORE}/100]"
+  issue.status = "[CLOSED]" if BEST_SCORE >= 80 else "[PARTIAL]"
+else:
+  # スコアが低すぎる — commit しない
+  git checkout . && git clean -fd
+  issue.status = "[SKIPPED] best score {BEST_SCORE}/100 below threshold"
+```
+
+#### ステップ 5: 成功/失敗フィードバックの記録
+
+**合格時** (score = 100):
+```markdown
+### [SUCCESS-YYYYMMDD-NNN] {issue description}
+- **スコア**: 100/100 (attempt {N})
+- **有効だった修正パターン**: {what worked}
+- **Evaluator の評価**: {positive feedback}
+```
+
+**部分合格時** (60 ≤ score < 100):
+```markdown
+### [PARTIAL-YYYYMMDD-NNN] {issue description}
+- **最終スコア**: {score}/100 (attempts: {N}, converged/maxed)
+- **残りの減点要因**: {what couldn't be fixed}
+- **改善のヒント**: {evaluator's last feedback}
+```
+
+これらは `.overnight-state/phases/phase-8-feedback-log.md` に保存し、Phase 10 でパターン学習に使用。
 
 ### 8c. リファクタリング (レポートのみ — デフォルト)
 
-リファクタリングは影響範囲が大きく、自動修正では安全性の保証が難しい。そのため:
+リファクタリングは影響範囲が大きく、自動修正では安全性の保証が難しい。
 
 - **デフォルト動作**: Phase 2 で発見されたリファクタリング候補を朝レポートの「リファクタリング候補」セクションに記載。自動実行はしない。
-- **config で `phase_8.auto_refactor: true` の場合のみ**: refactoring-specialist agent に委譲し、テスト → commit or revert。ただし最大1件、50行以内の変更に限定。
-
----
-
-## Phase 9: E2E回帰確認
-
-**Phase 8 で1件でも修正を行った場合は必ず実行** (修正0件の場合のみスキップ)。
-
-**前提条件**: `WEB_APP=true` && Puppeteer MCP 利用可能。前提条件を満たさない場合、TEST_CMD のみで回帰確認。
-
-1. TEST_CMD を実行 → 全テスト PASS を確認
-2. `WEB_APP=true` の場合: 全ページにナビゲート → スクショ撮影
-3. コンソールエラーチェック
-4. Phase 3 で発見・修正された issue のページを重点確認
-5. 修正前後の比較 → 改善されたか、悪化していないか確認
-
-修正が UI を壊している場合:
-- 該当 commit を `git revert <hash> --no-edit` → issue を `[REVERTED]` に更新
-- 朝レポートに「回帰テストで問題発見、commit X を revert」と記録
-
-**テストの通過は修正の正しさを保証しない** — テストカバレッジが部分的な場合、Phase 9 の視覚的回帰確認が最後の防壁となる。
-
-結果を `.overnight-state/phases/phase-9-regression.md` に保存。
+- **config で `auto_refactor: true` の場合のみ**: refactoring-specialist agent に委譲 → Evaluator ループ (同じ仕組み) で検証。最大1件。
 
 ---
 
@@ -782,11 +917,25 @@ cp .overnight-state/morning-report.md "$ORIGINAL_PROJECT_PATH/OVERNIGHT-REPORT.m
 
 ---
 
-## 自動修正済み (--dry-run の場合: 修正候補)
+## Generator-Evaluator 結果 (--dry-run の場合: 修正候補)
 
-| # | Issue | 修正内容 | Commit |
-|---|-------|---------|--------|
-| 1 | ... | ... | `abc1234` |
+| # | Issue | 最終スコア | ループ回数 | 終了理由 | Commit |
+|---|-------|-----------|-----------|---------|--------|
+| 1 | ... | 100/100 | 2 | perfect | `abc1234` |
+| 2 | ... | 85/100 | 5 | converged | `def5678` |
+| 3 | ... | 45/100 | 3 | below_threshold | (not committed) |
+
+### スコア分布
+- 100点 (完璧): N 件
+- 80-99点 (合格): N 件
+- 60-79点 (部分合格): N 件
+- 60点未満 (不合格): N 件
+- 平均スコア: XX/100
+
+### 減点パターン (多い順)
+1. コントラスト不足: N 件
+2. ブラウザ動作不良: N 件
+3. ...
 
 ---
 
