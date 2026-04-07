@@ -21,6 +21,24 @@
   },
 
   "pattern_memory_max_entries": 100,
+  "fix_pattern_db_path": "~/.claude/memory/overnight_fix_patterns.md",
+
+  "shared_context": {
+    "enabled": true,
+    "file": ".overnight-state/shared-context.json"
+  },
+
+  "live_status": {
+    "enabled": true,
+    "update_interval_seconds": 60,
+    "mirror_to_main_repo": true,
+    "file": ".overnight-live-status.md"
+  },
+
+  "self_test": {
+    "timeout_seconds": 30,
+    "cleanup_worktree": true
+  },
 
   "phases": {
     "1a": {

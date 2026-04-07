@@ -2,7 +2,7 @@
 name: overnight
 description: "Autonomous overnight improvement engine. Runs 11-phase full-stack QA (infrastructure, DB, API, code, interactive UI, design, performance, dependencies, documentation) → Fix → E2E regression → Learning & Morning Report. Designed to run for hours unattended. Japanese/English bilingual."
 user_invocable: true
-args: "[minutes] or [--rounds N] or [--phases ...] or [--skip ...] or [--dry-run] or [--resume] or [--focus security|design|ops|performance] or [--max-cost N]"
+args: "[minutes] or [--rounds N] or [--phases ...] or [--skip ...] or [--dry-run] or [--resume] or [--focus security|design|ops|performance] or [--max-cost N] or [--self-test]"
 ---
 
 # Autonomous Overnight Improvement Engine
@@ -28,6 +28,7 @@ args: "[minutes] or [--rounds N] or [--phases ...] or [--skip ...] or [--dry-run
 | `--focus ops` | プリセット: Phase 1a, 1b, 1c, 5, 8, 10 (運用重点) |
 | `--focus performance` | プリセット: Phase 1b, 5, 8, 10 (パフォーマンス重点) |
 | `--max-cost N` | トークンコスト上限 (USD)。デフォルト: config の `cost_budget.max_cost_usd` |
+| `--self-test` | スキル自体の動作検証 (30秒)。プロジェクト検出、エージェント検証、テンプレート生成を確認して終了 |
 | 空 | デフォルト: 360分 (6時間)、全フェーズ |
 
 ```
@@ -36,6 +37,37 @@ MAX_COST_USD = <parsed or config.cost_budget.max_cost_usd or 50>
 START_TIME = $(date +%s)
 AGENT_LAUNCH_COUNT = 0
 ```
+
+### Self-Test モード (`--self-test`)
+
+`--self-test` が指定された場合、以下を実行して終了 (30秒以内):
+
+```
+/overnight --self-test
+
+Self-test Results:
+[✓] プロジェクト検出: typescript / nextjs
+[✓] パッケージマネージャ: pnpm
+[✓] テストコマンド: pnpm test && pnpm run typecheck
+[✓] DB 検出: postgres
+[✓] Docker 検出: true
+[✓] Web アプリ: true
+[✓] エージェント (11/11): 全て存在
+[✓] 外部ツール: ab=yes, pip-audit=no, jq=yes, terminal-notifier=yes
+[✓] Playwright MCP: 利用可能
+[✓] Puppeteer MCP: 利用可能
+[✓] Worktree 作成/削除: OK
+[✓] config.json 読み込み: OK
+[✓] run.json テンプレート生成: OK
+[✓] 朝レポートテンプレート生成: OK
+[✓] 修正パターンDB: 12 patterns loaded
+[✓] 採点JSON構造: valid
+[✓] LIVE-STATUS.md 書き込み: OK
+
+Result: 17/17 passed — Ready to run
+```
+
+self-test はプロジェクトを変更しない (read-only)。worktree は作成後即削除。
 
 ---
 
@@ -148,10 +180,64 @@ mkdir -p .overnight-state/phases .overnight-state/issues .overnight-state/histor
 
 ### 2e. メモリ読み込み
 - `~/.claude/memory/qa_bug_patterns.md` を読み込む (存在しなければスキップ)
+- `~/.claude/memory/overnight_fix_patterns.md` を読み込む (修正パターンDB — 存在しなければスキップ)
 - `~/.claude/lessons/` のレッスンをスキャン
 
 ### 2f. 設定読み込み
 `.overnight-state/config.json` が存在すればそれを使用。なければ `~/.claude/skills/overnight/templates/config-default.json` をコピー。
+
+### 2i. 共有コンテキスト初期化
+
+**Phase 間の情報伝播用構造化データ**。各 Phase が発見した情報を後続 Phase が再利用し、重複分析を排除:
+
+```json
+// .overnight-state/shared-context.json
+{
+  "api_endpoints": [],      // Phase 1c が発見 → Phase 3, 8 が参照
+  "page_routes": [],         // Phase 3 が発見 → Phase 4, 8 が参照
+  "design_tokens": {},       // Phase 4 が発見 → Phase 8 が参照
+  "slow_queries": [],        // Phase 1b が発見 → Phase 5 が参照
+  "test_coverage": {},       // Phase 2 が発見 → Phase 8 が参照
+  "component_map": {},       // Phase 4 が発見 → Phase 8 が参照
+  "login_session": {}        // Phase 3 が取得 → Phase 4, 8-9 が再利用
+}
+```
+
+各 Phase は実行前に `shared-context.json` を読み、実行後に自分の発見を追記。後続 Phase はプロジェクトを再スキャンする代わりにこのファイルを参照。
+
+### 2j. LIVE-STATUS 初期化
+
+実行中のリアルタイム進捗ファイル。Phase 完了/開始のたびに更新:
+
+```bash
+# メインリポジトリにも配置 (夜中に cat で確認可能)
+LIVE_STATUS_PATH="$ORIGINAL_PROJECT_PATH/.overnight-live-status.md"
+```
+
+初期状態:
+```markdown
+# Overnight Live Status — HH:MM JST
+## 進捗: ░░░░░░░░░░░░ 0%
+| Phase | Status | Issues | Time |
+|-------|--------|--------|------|
+| 0 Setup | DONE | - | Xm |
+| 1a Infra | pending | - | - |
+...
+## Cost: $0.00 / $50.00
+```
+
+### 2k. Agent コスト追跡初期化
+
+```
+AGENT_CALLS = { opus: 0, sonnet: 0, haiku: 0 }
+```
+
+Agent 起動のたびにモデル別カウントをインクリメント。Phase 完了ごとにコスト概算:
+```
+estimated_cost = (opus_calls * 1.50) + (sonnet_calls * 0.30) + (haiku_calls * 0.05)
+```
+
+`run.json` と `LIVE-STATUS` の両方に反映。
 
 ### 2g. エージェント存在チェック (CRITICAL — fail fast)
 
@@ -689,7 +775,9 @@ issue の種類に応じて修正を実行:
 
 **Generator が受け取る情報**:
 - issue の説明、ファイルパス、重大度
-- (2回目以降) Evaluator からのフィードバック: 減点理由、どこがダメだったか、スクショ
+- `shared-context.json` から関連情報 (エンドポイント、ルート、トークン等)
+- `~/.claude/memory/overnight_fix_patterns.md` から類似 issue の過去の成功修正パターン
+- (2回目以降) Evaluator からのフィードバック: 減点理由、**`fix_hint` (具体的な修正指示)**、スクショ
 
 #### ステップ 3: Evaluator (採点)
 
@@ -710,18 +798,67 @@ issue の種類に応じて修正を実行:
 
 **詳細な採点ルーブリックは `reference/phase-details.md` の「Evaluator 採点シート」セクション参照。**
 
+### 差分 Evaluator: 修正前後の「改善度」を採点
+
+Evaluator は修正前のベースラインスコアを最初に計測し、修正後のスコアと比較する:
+
+```
+修正前ベースライン: 機能=0, ブラウザ=0, ビジュアル=20, データ=20, a11y=15 = 55/100
+修正後:            機能=20, ブラウザ=20, ビジュアル=20, データ=20, a11y=15 = 95/100
+改善度: +40 (機能とブラウザが復活)
+副作用: 0 (他カテゴリのスコア低下なし)
+```
+
+**ポイント**: 修正と無関係な既存の a11y 問題で減点しない。「直すべきものが直ったか」にフォーカス。
+- スコアは修正後の絶対値で判定 (100点を目指す)
+- ただし**副作用チェック**として、修正前より下がったカテゴリがあれば `-5点ペナルティ/カテゴリ`
+
+### 決定的チェック vs AI 判定の分離
+
+各カテゴリのスコアは**決定的チェック (機械判定)** と **AI 判定** に分離。決定的チェックは何度実行しても同じ結果を返し、採点の再現性を保証:
+
+| カテゴリ | 決定的チェック (再現性100%) | AI 判定 (ブレあり) |
+|---------|--------------------------|-------------------|
+| 機能テスト (20) | TEST_CMD結果: PASS=20, FAIL=0 | なし |
+| ブラウザ動作 (20) | DOM変化/ネットワーク/モーダル検出: 12点 | 動作の妥当性判断: 8点 |
+| ビジュアル品質 (20) | 横スクロール(-4)/コンソールエラー(-4)/白画面(-4): 12点 | レイアウト美観: 8点 |
+| データ整合性 (20) | 数値完全一致/件数一致: 15点 | データ意味の妥当性: 5点 |
+| a11y (20) | コントラスト比計算/タッチターゲットpx: 14点 | aria/role の妥当性: 6点 |
+| **合計** | **73点 (再現性保証)** | **27点 (AI依存)** |
+
 Evaluator の出力形式:
 ```json
 {
   "score": 85,
+  "baseline_score": 55,
+  "improvement": 30,
+  "side_effects": 0,
   "breakdown": {
-    "functional": { "score": 20, "max": 20, "detail": "TEST_CMD PASS" },
-    "browser": { "score": 15, "max": 20, "detail": "ボタンクリック後にモーダルが開かない" },
-    "visual": { "score": 20, "max": 20, "detail": "レイアウト正常" },
-    "data": { "score": 20, "max": 20, "detail": "API/UI一致" },
-    "a11y": { "score": 10, "max": 20, "detail": "コントラスト比 3.2:1 (要 4.5:1)" }
+    "functional": { "score": 20, "max": 20, "deterministic": 20, "ai": 0, "detail": "TEST_CMD PASS" },
+    "browser": { "score": 15, "max": 20, "deterministic": 12, "ai": 3, "detail": "DOM変化あり、モーダル開かず" },
+    "visual": { "score": 20, "max": 20, "deterministic": 12, "ai": 8, "detail": "レイアウト正常" },
+    "data": { "score": 20, "max": 20, "deterministic": 15, "ai": 5, "detail": "API/UI一致" },
+    "a11y": { "score": 10, "max": 20, "deterministic": 8, "ai": 2, "detail": "コントラスト比 3.2:1 (要 4.5:1)" }
   },
-  "feedback_to_generator": "コントラスト比が不足。text-gray-400 を text-gray-600 に変更すべき。モーダルの開閉は onClick ハンドラが未接続の可能性。",
+  "fix_hints": [
+    {
+      "file": "components/Button.tsx",
+      "line": 42,
+      "current": "text-gray-400",
+      "suggested": "text-gray-600",
+      "reason": "contrast ratio 3.2:1 → 5.7:1",
+      "category": "a11y"
+    },
+    {
+      "file": "components/OrderModal.tsx",
+      "line": 18,
+      "current": "// TODO: connect onClick",
+      "suggested": "onClick={handleOpen}",
+      "reason": "onClick handler not connected",
+      "category": "browser"
+    }
+  ],
+  "feedback_to_generator": "fix_hints に従って修正すれば100点に到達可能。",
   "screenshot_path": ".overnight-state/screenshots/issue-001-eval-1.png"
 }
 ```
@@ -761,9 +898,11 @@ for attempt in 1..max_eval_loops:
   # ベストスコア更新
   if score > BEST_SCORE:
     BEST_SCORE = score
-    # ベスト状態を stash に保存
-    git stash push -m "overnight-best-{issue_id}-score-{score}"
-    BEST_STASH = true
+    # ベスト状態をテンポラリブランチに保存 (stash より安全)
+    git checkout -b overnight-best-{issue_id}
+    git add -A && git commit -m "temp: best score {score} for {issue_id}"
+    git checkout -  # 元のブランチに戻る
+    BEST_BRANCH = "overnight-best-{issue_id}"
 
   # 収束検出: 3回連続同スコア
   if score == PREV_SCORE:
@@ -784,9 +923,10 @@ for attempt in 1..max_eval_loops:
 
 # ループ終了後の処理
 if BEST_SCORE >= config.min_commit_score (default: 60):
-  # ベスト状態を復元して commit
-  if BEST_STASH:
-    git stash pop
+  # ベスト状態をテンポラリブランチから復元して commit
+  if BEST_BRANCH:
+    git cherry-pick BEST_BRANCH --no-commit
+    git branch -D BEST_BRANCH  # テンポラリブランチ削除
   git add <files> && git commit -m "fix(overnight): {description} [score:{BEST_SCORE}/100]"
   issue.status = "[CLOSED]" if BEST_SCORE >= 80 else "[PARTIAL]"
 else:
@@ -814,6 +954,36 @@ else:
 ```
 
 これらは `.overnight-state/phases/phase-8-feedback-log.md` に保存し、Phase 10 でパターン学習に使用。
+
+#### ステップ 6: 修正パターンDB への記録
+
+**100点で合格した修正は `~/.claude/memory/overnight_fix_patterns.md` に自動記録** — 次回以降の Generator がこのDBを参照し、初回で100点に到達する確率を上げる:
+
+```markdown
+### [FIX-PATTERN-YYYYMMDD-NNN] {修正カテゴリ}: {問題の要約}
+- **問題**: {具体的な問題}
+- **修正**: {何をどう直したか}
+- **ファイル**: {path:line}
+- **スコア推移**: {attempt 1: X → attempt 2: Y → ... → 100}
+- **成功率**: 1/1 (初回)
+- **適用条件**: {フレームワーク、パターン}
+- **fix_hint が有効だったか**: yes/no
+```
+
+同じパターンの修正が再度100点を取ったら `成功率` をインクリメント。成功率が高いパターンは Generator が優先参照。
+
+#### ステップ 7: LIVE-STATUS 更新
+
+各 issue のループ完了後に `.overnight-live-status.md` を更新:
+
+```markdown
+## Eval Loop Progress
+| Issue | Score | Attempts | Status |
+|-------|-------|----------|--------|
+| CODE-001 | 100/100 | 2 | DONE |
+| CODE-002 | 85/100 | 3/5 | ▶ IN PROGRESS |
+| SEC-001 | pending | - | waiting |
+```
 
 ### 8c. リファクタリング (レポートのみ — デフォルト)
 
@@ -984,9 +1154,11 @@ cp .overnight-state/morning-report.md "$ORIGINAL_PROJECT_PATH/OVERNIGHT-REPORT.m
 ### Phase 7: ドキュメントQA
 - ...
 
-### Phase 9: E2E回帰確認
-- テスト: PASS/FAIL
-- Revert: N 件
+### Phase 8-9: Generator-Evaluator ループ
+- 平均スコア: XX/100
+- 100点到達率: N/M 件
+- 平均ループ回数: X.X 回
+- fix_hint 有効率: XX%
 
 ---
 

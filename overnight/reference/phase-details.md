@@ -731,26 +731,26 @@ Step 3: issue の種類に応じたテスト実行:
   - 解決されていない → 0点
 ```
 
-#### カテゴリ 3: ビジュアル品質 (20点)
+#### カテゴリ 3: ビジュアル品質 (20点) — 決定的12点 + AI判定8点
 
 修正前後のスクショを比較:
 
 ```
-Step 1: 修正前のスクショ (Phase 3 で撮影済み) を参照
+Step 1: 修正前のスクショ (Phase 3 で撮影済み) を参照 (ベースライン)
 Step 2: 修正後のページをスクショ撮影
-Step 3: AI で比較分析:
+Step 3: 決定的チェック + AI 分析:
 
-チェック項目:
-- レイアウト崩壊なし → +5点
-- 要素の重なりなし → +5点
-- テキスト切れなし → +5点
-- 修正による意図しない視覚的変化なし → +5点
+=== 決定的チェック (12点、再現性100%) ===
+- 横スクロール未発生: scrollWidth <= clientWidth → +4点, 発生 → 0点
+- コンソールエラーなし: errors.length === 0 → +4点, あり → 0点
+- 白画面でない: body.innerHTML.length >= 100 → +4点, 白画面 → 0点
 
-減点:
-- 新しいレイアウト崩壊 → -10点
-- 新しい要素重なり → -10点
-- 既存要素が消えた → -15点
-- 白画面 / エラー表示 → -20点 (0点に)
+=== AI 判定 (8点、ブレあり) ===
+- レイアウトの美観・バランス → 0-4点
+- 修正による意図しない視覚変化なし → 0-4点
+
+=== 副作用ペナルティ ===
+- ベースライン (修正前) より決定的スコアが下がった → -5点
 ```
 
 **Web アプリでない場合**: このカテゴリは満点 (20点) 扱い。
@@ -809,16 +809,35 @@ Step 1: 修正後のページで a11y チェック実行 (browser_evaluate で J
 }
 ```
 
-**不合格 (<100点) の場合**:
+**不合格 (<100点) の場合 — fix_hint 付き**:
 ```
 {
   "score": 75,
-  "feedback_to_generator": "機能は動作するがコントラスト比が不足 (3.2:1, 要4.5:1)。text-gray-400 → text-gray-600 に変更すべき。",
+  "baseline_score": 55,
+  "improvement": 20,
+  "side_effects": 0,
+  "feedback_to_generator": "fix_hints に従って修正すれば100点に到達可能。",
+  "fix_hints": [
+    {
+      "file": "components/Button.tsx",
+      "line": 42,
+      "current": "text-gray-400",
+      "suggested": "text-gray-600",
+      "reason": "contrast ratio 3.2:1 → needs 4.5:1",
+      "category": "a11y"
+    }
+  ],
   "specific_failures": [
-    { "category": "a11y", "detail": "contrast ratio 3.2:1 on .btn-primary text", "suggestion": "darken text color" }
+    { "category": "a11y", "detail": "contrast ratio 3.2:1 on .btn-primary text", "deterministic_score": 8, "ai_score": 2 }
   ],
   "screenshot_path": ".overnight-state/screenshots/issue-001-eval-2.png"
 }
+```
+
+**fix_hint の意義**: Generator が「どこをどう直すか」を自分で考えなくて済む。Evaluator は問題箇所を特定できているので、具体的な修正指示を出す。これにより:
+- ループ回数が 5→2 回程度に減少
+- Generator のコスト (Opus) を削減
+- 修正精度が向上
 ```
 
 ### 収束判定の詳細
