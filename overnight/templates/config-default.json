@@ -1,17 +1,38 @@
 {
   "default_budget_minutes": 360,
 
+  "cost_budget": {
+    "max_cost_usd": 50,
+    "warn_at_percent": 80,
+    "stop_at_percent": 100,
+    "model_routing": {
+      "expensive_phases": ["2", "8"],
+      "standard_phases": ["1a", "1b", "1c", "5", "7"],
+      "cheap_phases": ["6"]
+    }
+  },
+
+  "agent_concurrency_limit": 3,
+
+  "production_safety": {
+    "allow_production": false,
+    "safe_url_patterns": ["localhost", "127.0.0.1", "0.0.0.0", "staging", "dev", "local", "test"],
+    "check_env_vars": ["DATABASE_URL", "API_URL", "BASE_URL", "NEXT_PUBLIC_API_URL"]
+  },
+
+  "pattern_memory_max_entries": 100,
+
   "phases": {
     "1a": {
       "enabled": true,
-      "description": "インフラ健全性チェック",
+      "description": "Infrastructure health check",
       "check_docker": "auto",
       "disk_warning_threshold_percent": 90,
       "log_directories": []
     },
     "1b": {
       "enabled": true,
-      "description": "DB運用チェック",
+      "description": "DB operations check",
       "db_type": "auto",
       "check_orphaned_records": true,
       "check_data_quality": true,
@@ -20,7 +41,7 @@
     },
     "1c": {
       "enabled": true,
-      "description": "API運用テスト",
+      "description": "API operations test",
       "base_api_url": "auto",
       "health_endpoint": "/api/health",
       "slow_response_threshold_ms": 500,
@@ -36,14 +57,14 @@
     },
     "2": {
       "enabled": true,
-      "description": "コードQA (flow-qa 5パス)",
+      "description": "Code QA (flow-qa 5-pass)",
       "scan_scope": "full_project",
       "include_medium_severity": true,
       "max_fix_loops": 8
     },
     "3": {
       "enabled": true,
-      "description": "インタラクティブQA",
+      "description": "Interactive QA",
       "web_url": "auto",
       "login": {
         "url": "/login",
@@ -56,7 +77,12 @@
       "pages": "auto",
       "max_buttons_per_page": 20,
       "skip_destructive_buttons": true,
-      "destructive_keywords": ["削除", "delete", "remove", "キャンセル", "cancel", "destroy", "drop", "reset"],
+      "destructive_detection": {
+        "keywords": ["delete", "remove", "cancel", "destroy", "drop", "reset", "削除", "キャンセル"],
+        "aria_patterns": ["aria-label*=delete", "aria-label*=remove", "aria-label*=destroy"],
+        "data_attributes": ["data-destructive", "data-danger", "data-action=delete"],
+        "css_patterns": [".btn-danger", ".btn-destructive", ".text-destructive"]
+      },
       "test_forms": true,
       "test_toggles": true,
       "test_dead_clicks": true,
@@ -65,19 +91,26 @@
         "create_page": "",
         "list_page": "",
         "edit_page": "",
-        "test_data": {}
+        "test_data": {},
+        "cleanup_failure_action": "log_orphan_ids"
       },
       "journeys": [],
       "test_error_pages": true,
-      "xss_test_payloads": [
-        "<script>alert('xss')</script>",
-        "' OR '1'='1",
-        "<img src=x onerror=alert('xss')>"
-      ]
+      "injection_test_payloads": {
+        "xss": [
+          "<script>alert('xss')</script>",
+          "<img src=x onerror=alert('xss')>"
+        ],
+        "sqli": [
+          "' OR '1'='1",
+          "'; DROP TABLE users; --",
+          "1 UNION SELECT NULL--"
+        ]
+      }
     },
     "4": {
       "enabled": true,
-      "description": "デザインQA",
+      "description": "Design QA",
       "viewports": {
         "desktop": { "width": 1440, "height": 900 },
         "tablet": { "width": 768, "height": 1024 },
@@ -103,7 +136,7 @@
     },
     "5": {
       "enabled": true,
-      "description": "パフォーマンスQA",
+      "description": "Performance QA",
       "bundle_budget_kb": 1000,
       "slow_query_threshold_ms": 100,
       "check_n_plus_one": true,
@@ -112,7 +145,7 @@
     },
     "6": {
       "enabled": true,
-      "description": "依存関係QA",
+      "description": "Dependency QA",
       "allowed_licenses": [
         "MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "0BSD", "Unlicense", "CC0-1.0"
       ],
@@ -122,7 +155,7 @@
     },
     "7": {
       "enabled": true,
-      "description": "ドキュメントQA",
+      "description": "Documentation QA",
       "check_readme": true,
       "check_api_docs": true,
       "check_stale_todos": true,
@@ -134,22 +167,23 @@
       "description": "Fix & Refactor",
       "auto_fix_severities": ["CRITICAL", "HIGH"],
       "max_fixes_per_run": 20,
-      "max_commits": 30,
+      "max_commits": 25,
       "max_lines_changed_per_fix": 50,
-      "max_refactors": 1
+      "auto_refactor": false
     },
     "9": {
       "enabled": true,
-      "description": "E2E回帰確認",
+      "description": "E2E regression check (mandatory after Phase 8 fixes)",
       "auto_revert_on_regression": true
     },
     "10": {
       "enabled": true,
-      "description": "学習 & レポート",
+      "description": "Learning & Report",
       "reserved_minutes": 30,
       "update_bug_patterns": true,
       "create_lessons": true,
-      "trend_history_count": 5
+      "trend_history_count": 5,
+      "mirror_report_to_main_repo": true
     }
   },
 
